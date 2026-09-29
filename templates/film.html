@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Film</title>
+<!-- One page = one film. render.mjs calls window.seek(t) for every subframe; nothing may depend on the previous frame. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,600&display=block" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1920px; height: 1080px; overflow: hidden; background: #f5f5f2; }
+  body { font-family: 'Geist', 'Segoe UI Emoji', sans-serif; color: #0e0e10; -webkit-font-smoothing: antialiased; }
+  .abs { position: absolute; left: 0; top: 0; }
+  #world { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; transform-origin: 0 0; }   /* the camera moves this */
+  /* headline words rise out of a mask line: the line clips, each word translates */
+  .hl { position: absolute; left: 240px; width: 760px; height: 96px; overflow: hidden; z-index: 2; }
+  .hl span.w { position: absolute; top: 0; font-size: 76px; line-height: 96px; font-weight: 600; letter-spacing: -2.4px; white-space: nowrap; }
+  #box { z-index: 3; background: #0e0e10; }
+  /* end card lives in screen space, on top of everything */
+  #end { position: absolute; inset: 0; z-index: 100; background: #0284c7; overflow: hidden; }
+  .eline { position: absolute; left: 0; width: 1920px; text-align: center; white-space: nowrap; }
+  /* word gaps in px: an em here would resolve against the 16px parent, not the 96px word */
+  .eline .w { display: inline-block; overflow: hidden; vertical-align: top; height: 118px; padding: 0 6px; margin: 0 8px; }
+  .eline .w span { display: inline-block; font-size: 96px; line-height: 118px; font-weight: 600; letter-spacing: -1.6px; color: #fff; }
+</style>
+</head>
+<body>
+<div id="world">
+  <div class="hl" id="hlA" style="top:398px"></div>
+  <div class="hl" id="hlB" style="top:494px"></div>
+  <div id="box" class="abs"></div>
+</div>
+<div id="end"><div class="eline" id="e1" style="top:460px"></div></div>
+
+<script>
+// ============ constants (top of the script, so they exist when the renderer first calls seek) ============
+const BPM = 120, BEAT = 60 / BPM;
+const DUR = 8.0, T_DROP = 4 * BEAT;
+const HEADLINES = [ // [in, out, line1, line2]  out = when the words leave upward
+  [0.3, 5.0, 'Primeira ideia', 'em duas linhas.'],
+];
+// Camera keys [t, zoom, cx, cy]: one move per scene, eased, zoom interpolated in log space.
+// Keep each scene's move steady and in one direction; a push straight into a pull reads as a wobble.
+const CAM = [[0, 1.0, 960, 540], [T_DROP, 1.06, 980, 540], [DUR, 1.1, 1000, 540]];
+
+// ============ math ============
+const clamp = (x, a = 0, c = 1) => Math.min(c, Math.max(a, x));
+const lerp = (a, c, p) => a + (c - a) * p;
+const prog = (t, a, c) => clamp((t - a) / (c - a));
+const eio = p => p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;   // in-out cubic
+const eout = p => 1 - Math.pow(1 - p, 3);
+const ein = p => p * p * p;
+const esine = p => -(Math.cos(Math.PI * p) - 1) / 2;                           // lower peak speed: use for fast moves
+// closed-form damped spring step response 0 -> 1 (pops, settles). zeta<1 overshoots.
+function spring(t, zeta = 0.7, omega = 18) {
+  if (t <= 0) return 0;
+  const wd = omega * Math.sqrt(1 - zeta * zeta);
+  return 1 - Math.exp(-zeta * omega * t) * (Math.cos(wd * t) + (zeta * omega / wd) * Math.sin(wd * t));
+}
+const hex = c => [1, 3, 5].map(i => parseInt(c.slice(i, i + 2), 16));
+const mix = (c1, c2, p) => { const a = hex(c1), d = hex(c2); return `rgb(${a.map((v, i) => Math.round(lerp(v, d[i], p))).join(',')})`; };
+const lerpR = (A, B, p) => ({ x: lerp(A.x, B.x, p), y: lerp(A.y, B.y, p), w: lerp(A.w, B.w, p), h: lerp(A.h, B.h, p) });
+function camera(t) {
+  let i = 0;
+  while (i < CAM.length - 2 && t > CAM[i + 1][0]) i++;
+  const [t0, z0, x0, y0] = CAM[i], [t1, z1, x1, y1] = CAM[i + 1];
+  const p = eio(prog(t, t0, t1));
+  return { z: Math.exp(lerp(Math.log(z0), Math.log(z1), p)), x: lerp(x0, x1, p), y: lerp(y0, y1, p) };
+}
+// frame edge-to-edge coverage for floods: farthest visible corner from (ox, oy), in world units
+const farthest = (c, ox, oy) => Math.max(...[[-1, -1], [1, -1], [-1, 1], [1, 1]].map(([sx, sy]) => Math.hypot(c.x + sx * 960 / c.z - ox, c.y + sy * 540 / c.z - oy))) + 40;
+const $ = id => document.getElementById(id);
+// use visibility, not display: '' falls back to a stylesheet display:none and the element never shows
+const show = (el, on) => { el.style.visibility = on ? 'visible' : 'hidden'; };
+function box(el, x, y, w, h) { const s = el.style; s.left = x + 'px'; s.top = y + 'px'; if (w != null) { s.width = w + 'px'; s.height = h + 'px'; } }
+
+// ============ static DOM ============
+const world = $('world'), boxEl = $('box'), end = $('end');
+const HL = HEADLINES.map(([tin, tout, l1, l2]) => {
+  const mk = (host, line) => line.split(' ').map(w => { const s = document.createElement('span'); s.className = 'w'; s.textContent = w; host.appendChild(s); return s; });
+  return { tin, tout, a: mk($('hlA'), l1), b: mk($('hlB'), l2) };
+});
+function wordsInto(el, text) { el.innerHTML = text.split(' ').map(w => `<span class="w"><span>${w}</span></span>`).join(' '); return [...el.querySelectorAll('.w > span')]; }
+const endWords = wordsInto($('e1'), 'Uma frase final.');
+
+function measure() {  // runs once, after fonts load
+  for (const hl of HL) for (const line of [hl.a, hl.b]) { let x = 0; for (const s of line) { s.style.left = x + 'px'; x += s.offsetWidth + 18; } }
+}
+
+// ============ seek(t): every style computed from t, nothing else ============
+function seek(t) {
+  const cam = camera(t);
+  world.style.transform = `translate(960px,540px) scale(${cam.z}) translate(${-cam.x}px,${-cam.y}px)`;
+
+  HL.forEach(({ tin, tout, a, b }) => [a, b].forEach((line, li) => line.forEach((s, i) => {
+    const st = tin + li * 0.12 + i * 0.06;
+    const inn = spring(t - st, 0.8, 15), out = ein(prog(t, tout + i * 0.03, tout + 0.24 + i * 0.03));
+    s.style.transform = `translateY(${(1 - inn) * 100 - out * 100}px)`;
+    show(s, t > st && out < 1);
+  })));
+
+  // example: a pill that grows from a dot with a spring, then stretches on the drop
+  const g = spring(t - 0.5, 0.7, 14), s2 = eio(prog(t, T_DROP, T_DROP + 0.6));
+  const w = lerp(0, 200, g) + 400 * s2, h = lerp(0, 200, g);
+  box(boxEl, 1250 - w / 2, 540 - h / 2, w, h); boxEl.style.borderRadius = h / 2 + 'px';
+
+  const endOn = t >= DUR - 2;
+  show(end, endOn);
+  if (endOn) endWords.forEach((s, i) => { const a = t - (DUR - 2) - i * 0.07; s.style.transform = `translateY(${(1 - (a <= 0 ? 0 : spring(a, 0.8, 16))) * 120}px)`; });
+}
+
+window.seek = seek;
+window.DUR = DUR;
+window.ready = (async () => {
+  // load every face you use, or the first frames render in a fallback font
+  await Promise.all(['400 16px Geist', '500 16px Geist', '600 76px Geist', '600 96px Geist', '600 100px Fraunces'].map(f => document.fonts.load(f)));
+  await document.fonts.ready;
+  await Promise.all([...document.images].map(im => im.decode().catch(() => 0)));
+  measure();
+  seek(0);
+  return true;
+})();
+</script>
+</body>
+</html>
