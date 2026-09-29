@@ -7,6 +7,24 @@ A Claude Code skill that turns an agent into a small motion-design studio: it in
 co-writes the script with you, and renders a polished 2D product film as code, with real motion blur, a beat-synced
 soundtrack and frame-by-frame quality control.
 
+## Examples
+
+Two films made with Seekframe for [Partidinha](https://partidinha.com), a WhatsApp bot + app that runs amateur
+football games. On-screen text is in Brazilian Portuguese.
+
+**Before / after** (19 s): the group-chat chaos on the music's build, then the bot takes over on the drop.
+
+![Before / after](docs/example-before-after.gif)
+
+<!-- drop the before/after mp4 here -->
+
+**Full flow** (36 s): create the game, players join through the bot, a player who owes money is blocked until the
+admin marks the payment, team draw, live match stats, and the day's ranking posted back in the group.
+
+![Full flow](docs/example-full-flow.gif)
+
+<!-- drop the full-flow mp4 here -->
+
 ## What it does
 
 1. **Intake.** Asks for everything specific to your product: what it is and the real problem it solves,
